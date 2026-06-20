@@ -9,3 +9,12 @@ results/
 uv.lock
 development_setup.md
 debug.log
+.env
+kaggle.json
+access_token
+*.pyc
+data/raw/
+data/processed/
+data/sample/*
+!data/sample/
+!data/sample/*.csv
