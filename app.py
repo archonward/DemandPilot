@@ -53,6 +53,10 @@ def format_date_range(df: pd.DataFrame) -> str:
   )
 
 
+def format_units(value: int) -> str:
+  return f"{value:,} units"
+
+
 def build_series_counts(processed_history_df: pd.DataFrame) -> pd.DataFrame:
   counts_df = (
       processed_history_df.groupby(["series_id", "shop_id", "item_id"], as_index=False)
@@ -342,22 +346,97 @@ def main() -> None:
         selected_forecast_path.name,
     )
 
+    st.subheader("Inventory Planning Inputs")
+    current_inventory = int(
+        st.number_input(
+            "Current inventory on hand",
+            min_value=0,
+            value=0,
+            step=1,
+        )
+    )
+    service_level_label = st.selectbox(
+        "Service level preference",
+        options=[
+            "Conservative - use 80% upper forecast",
+            "Aggressive - use 90% upper forecast",
+            "Expected only - use point forecast",
+        ],
+    )
+    lead_time_days = int(
+        st.number_input(
+            "Lead time in days",
+            min_value=0,
+            value=0,
+            step=1,
+        )
+    )
+
+    del lead_time_days
+
+    expected_demand_units = math.ceil(selected_forecast_df["forecast"].sum())
+    if service_level_label == "Expected only - use point forecast":
+      target_demand = expected_demand_units
+    elif service_level_label == "Conservative - use 80% upper forecast":
+      target_demand = math.ceil(selected_forecast_df["upper_80"].sum())
+    else:
+      target_demand = math.ceil(selected_forecast_df["upper_90"].sum())
+
+    safety_buffer = max(0, target_demand - expected_demand_units)
+    suggested_reorder_quantity = max(0, target_demand - current_inventory)
+    inventory_gap = current_inventory - target_demand
+
+    if current_inventory < expected_demand_units:
+      stockout_risk = "High"
+    elif current_inventory < target_demand:
+      stockout_risk = "Moderate"
+    else:
+      stockout_risk = "Low"
+
     st.subheader("Inventory Planning Recommendation")
-    recommended_stock = math.ceil(high_demand)
-    safety_buffer = math.ceil(high_demand - expected_demand)
-    recommendation_columns = st.columns(2)
-    recommendation_columns[0].metric(
-        "Recommended stock for next forecast horizon",
-        f"{recommended_stock} units",
+    planning_metrics_top = st.columns(3)
+    planning_metrics_top[0].metric(
+        "Expected demand over forecast horizon",
+        format_units(expected_demand_units),
     )
-    recommendation_columns[1].metric(
-        "Safety buffer above expected demand",
-        f"{safety_buffer} units",
+    planning_metrics_top[1].metric(
+        "Target stock level",
+        format_units(target_demand),
     )
+    planning_metrics_top[2].metric(
+        "Safety buffer",
+        format_units(safety_buffer),
+    )
+
+    planning_metrics_bottom = st.columns(3)
+    planning_metrics_bottom[0].metric(
+        "Current inventory",
+        format_units(current_inventory),
+    )
+    planning_metrics_bottom[1].metric(
+        "Suggested reorder quantity",
+        format_units(suggested_reorder_quantity),
+    )
+    planning_metrics_bottom[2].metric(
+        "Inventory gap",
+        format_units(inventory_gap),
+    )
+
+    st.markdown(f"**Stockout risk: {stockout_risk}**")
+
+    if suggested_reorder_quantity == 0:
+      st.caption(
+          "Current inventory is sufficient for the selected service level."
+      )
+    else:
+      st.caption(
+          "Recommended reorder quantity is based on the selected service "
+          "level and current inventory."
+      )
+
     st.caption(
-        "The recommendation uses the upper 80% forecast range to reduce "
-        "stockout risk while avoiding the more aggressive 90% worst-case "
-        "estimate."
+        "Expected only uses the point forecast. Conservative uses the upper "
+        "80% forecast range. Aggressive uses the upper 90% forecast range."
     )
 
     st.subheader("Forecast Chart")
