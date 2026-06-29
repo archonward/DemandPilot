@@ -10,6 +10,7 @@ import streamlit as st
 
 PROCESSED_HISTORY_PATH = Path("data/processed/future_sales_daily.csv")
 FORECASTS_DIR = Path("data/processed/forecasts")
+BACKTESTS_DIR = Path("data/processed/backtests")
 SAMPLE_HISTORICAL_PATH = Path("data/sample/sample_sales_series.csv")
 SAMPLE_FORECAST_PATH = Path("data/processed/sample_forecast.csv")
 HISTORICAL_WINDOW_DAYS = 180
@@ -36,6 +37,20 @@ def load_forecast_csv(path_str: str) -> pd.DataFrame:
   return pd.read_csv(path, parse_dates=["date"]).sort_values("date").reset_index(
       drop=True
   )
+
+
+@st.cache_data(show_spinner=False)
+def load_backtest_csv(path_str: str) -> pd.DataFrame:
+  path = Path(path_str)
+  return pd.read_csv(path, parse_dates=["date"]).sort_values("date").reset_index(
+      drop=True
+  )
+
+
+@st.cache_data(show_spinner=False)
+def load_metrics_csv(path_str: str) -> pd.DataFrame:
+  path = Path(path_str)
+  return pd.read_csv(path)
 
 
 def load_csv(path: Path, label: str) -> pd.DataFrame | None:
@@ -73,12 +88,36 @@ def build_selected_forecast_glob(shop_id: int, item_id: int) -> str:
   return f"shop_{shop_id}*item*{item_id}_forecast.csv"
 
 
+def build_selected_backtest_glob(shop_id: int, item_id: int) -> str:
+  return f"shop_{shop_id}*item*{item_id}*backtest.csv"
+
+
+def build_selected_metrics_glob(shop_id: int, item_id: int) -> str:
+  return f"shop*{shop_id}*item*{item_id}_metrics.csv"
+
+
 def find_selected_forecast_path(shop_id: int, item_id: int) -> Path | None:
   pattern = build_selected_forecast_glob(shop_id, item_id)
   matches = sorted(FORECASTS_DIR.glob(pattern))
   if not matches:
     return None
   return matches[0]
+
+
+def find_selected_backtest_paths(
+    shop_id: int,
+    item_id: int,
+) -> tuple[Path | None, Path | None]:
+  backtest_matches = sorted(
+      BACKTESTS_DIR.glob(build_selected_backtest_glob(shop_id, item_id))
+  )
+  metrics_matches = sorted(
+      BACKTESTS_DIR.glob(build_selected_metrics_glob(shop_id, item_id))
+  )
+
+  backtest_path = backtest_matches[0] if backtest_matches else None
+  metrics_path = metrics_matches[0] if metrics_matches else None
+  return backtest_path, metrics_path
 
 
 def build_history_chart(historical_df: pd.DataFrame) -> go.Figure:
@@ -190,6 +229,96 @@ def build_forecast_chart(
   return fig
 
 
+def build_backtest_chart(backtest_df: pd.DataFrame) -> go.Figure:
+  fig = go.Figure()
+
+  if {
+      "timesfm_lower_80",
+      "timesfm_upper_80",
+  }.issubset(backtest_df.columns):
+    fig.add_trace(
+        go.Scatter(
+            x=backtest_df["date"],
+            y=backtest_df["timesfm_upper_80"],
+            mode="lines",
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+            name="TimesFM 80% upper",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=backtest_df["date"],
+            y=backtest_df["timesfm_lower_80"],
+            mode="lines",
+            line={"width": 0},
+            fill="tonexty",
+            fillcolor="rgba(255, 127, 14, 0.18)",
+            name="TimesFM 80% interval",
+            hovertemplate="TimesFM 80% interval<br>%{x|%Y-%m-%d}<br>%{y:.2f}<extra></extra>",
+        )
+    )
+
+  fig.add_trace(
+      go.Scatter(
+          x=backtest_df["date"],
+          y=backtest_df["actual"],
+          mode="lines",
+          name="Actual",
+          line={"color": "#1f77b4", "width": 3},
+      )
+  )
+  fig.add_trace(
+      go.Scatter(
+          x=backtest_df["date"],
+          y=backtest_df["timesfm_forecast"],
+          mode="lines",
+          name="TimesFM forecast",
+          line={"color": "#ff7f0e", "width": 3},
+      )
+  )
+  fig.add_trace(
+      go.Scatter(
+          x=backtest_df["date"],
+          y=backtest_df["naive_forecast"],
+          mode="lines",
+          name="Naive forecast",
+          line={"color": "#2ca02c", "width": 2, "dash": "dash"},
+      )
+  )
+  fig.add_trace(
+      go.Scatter(
+          x=backtest_df["date"],
+          y=backtest_df["moving_average_30_forecast"],
+          mode="lines",
+          name="Moving average 30 forecast",
+          line={"color": "#9467bd", "width": 2, "dash": "dot"},
+      )
+  )
+  fig.add_trace(
+      go.Scatter(
+          x=backtest_df["date"],
+          y=backtest_df["seasonal_naive_7_forecast"],
+          mode="lines",
+          name="Seasonal naive 7 forecast",
+          line={"color": "#8c564b", "width": 2, "dash": "dashdot"},
+      )
+  )
+
+  fig.update_layout(
+      title="Backtest Forecast Comparison",
+      xaxis_title="Date",
+      yaxis_title="Sales quantity",
+      hovermode="x unified",
+      legend_title_text="Series",
+      height=500,
+      margin={"l": 20, "r": 20, "t": 60, "b": 20},
+  )
+
+  return fig
+
+
 def main() -> None:
   st.title("DemandPilot: Retail Demand Forecasting")
   st.caption(
@@ -200,8 +329,9 @@ def main() -> None:
   with st.sidebar:
     st.header("Instructions")
     st.caption(
-      "Current status: dashboard with product-store historical exploration "
-      "and selected-series forecast display when generated."
+      "Current status: dashboard with historical exploration, selected-series "
+      "forecasting, inventory recommendations, and backtest evaluation when "
+      "generated."
     )
     st.write("Step 1: Prepare dataset")
     st.write("Step 2: Run TimesFM forecast script")
@@ -304,13 +434,23 @@ def main() -> None:
   selected_forecast_path = find_selected_forecast_path(
       selected_shop_id, selected_item_id
   )
+  selected_backtest_path, selected_metrics_path = find_selected_backtest_paths(
+      selected_shop_id,
+      selected_item_id,
+  )
   selected_forecast_df: pd.DataFrame | None = None
+  selected_backtest_df: pd.DataFrame | None = None
+  selected_metrics_df: pd.DataFrame | None = None
 
   if selected_forecast_path is not None:
     selected_forecast_df = load_csv(
         selected_forecast_path,
         "selected-series forecast data",
     )
+
+  if selected_backtest_path is not None and selected_metrics_path is not None:
+    selected_backtest_df = load_backtest_csv(str(selected_backtest_path))
+    selected_metrics_df = load_metrics_csv(str(selected_metrics_path))
 
   active_forecast_df: pd.DataFrame | None = None
   active_forecast_path: Path | None = None
@@ -467,6 +607,97 @@ def main() -> None:
           "Select a series with at least 180 historical rows."
       )
 
+  if selected_backtest_df is not None and selected_metrics_df is not None:
+    st.subheader("Backtest Evaluation")
+    st.caption(
+        "Backtesting hides the last part of historical data, forecasts it, "
+        "and compares predicted demand against the actual observed demand."
+    )
+
+    display_metrics_df = selected_metrics_df.copy()
+    metrics_column_map = {
+        column: {
+            "model": "Model",
+            "mae": "MAE",
+            "rmse": "RMSE",
+            "mape": "MAPE",
+            "bias": "Bias",
+        }.get(column.lower(), column)
+        for column in display_metrics_df.columns
+    }
+    display_metrics_df = display_metrics_df.rename(columns=metrics_column_map)
+    if "Model" in display_metrics_df.columns:
+      display_metrics_df["Model"] = display_metrics_df["Model"].astype(str)
+    numeric_metric_columns = display_metrics_df.select_dtypes(
+        include="number"
+    ).columns
+    display_metrics_df[numeric_metric_columns] = display_metrics_df[
+        numeric_metric_columns
+    ].round(2)
+    st.dataframe(display_metrics_df, use_container_width=True)
+
+    best_model_text = None
+    if {"Model", "MAE"}.issubset(display_metrics_df.columns):
+      comparable_metrics_df = display_metrics_df.dropna(subset=["MAE"])
+      if not comparable_metrics_df.empty:
+        best_model_text = str(
+            comparable_metrics_df.loc[
+                comparable_metrics_df["MAE"].idxmin(),
+                "Model",
+            ]
+        )
+        st.write(f"Best model by MAE: {best_model_text}")
+        if best_model_text.strip().lower() == "timesfm":
+          st.caption(
+              "TimesFM performed best on this selected historical backtest."
+          )
+        else:
+          st.caption(
+              "A baseline performed better on this selected historical "
+              "backtest. This can happen for sparse or stable demand series."
+          )
+
+    backtest_chart = build_backtest_chart(selected_backtest_df)
+    st.plotly_chart(backtest_chart, use_container_width=True)
+
+    st.subheader("Backtest Details")
+    display_backtest_df = selected_backtest_df.copy()
+    numeric_backtest_columns = display_backtest_df.select_dtypes(
+        include="number"
+    ).columns
+    display_backtest_df[numeric_backtest_columns] = display_backtest_df[
+        numeric_backtest_columns
+    ].round(2)
+    st.dataframe(display_backtest_df, use_container_width=True)
+
+    download_columns = st.columns(2)
+    download_columns[0].download_button(
+        label="Download backtest rows CSV",
+        data=selected_backtest_path.read_bytes(),
+        file_name=selected_backtest_path.name,
+        mime="text/csv",
+    )
+    download_columns[1].download_button(
+        label="Download backtest metrics CSV",
+        data=selected_metrics_path.read_bytes(),
+        file_name=selected_metrics_path.name,
+        mime="text/csv",
+    )
+  else:
+    st.subheader("Backtest Evaluation")
+    st.info("No backtest has been generated for this selected series yet.")
+    if is_forecastable:
+      backtest_command = (
+          "python scripts/backtest_selected_series.py "
+          f"--shop-id {selected_shop_id} "
+          f"--item-id {selected_item_id} "
+          "--horizon 30"
+      )
+      st.code(backtest_command, language="bash")
+    else:
+      st.caption("This series has too little history for reliable backtesting.")
+
+  if selected_forecast_df is None:
     st.subheader("Sample TimesFM Forecast Demo")
     st.caption(
         "This section shows only the precomputed sample forecast and is not "
@@ -519,11 +750,11 @@ def main() -> None:
       active_forecast_df = sample_forecast_df
       active_forecast_path = SAMPLE_FORECAST_PATH
 
-  st.subheader("Forecast Details")
   if active_forecast_df is None or active_forecast_path is None:
     st.error("No forecast CSV is available to display.")
     return
 
+  st.subheader("Forecast Details")
   st.download_button(
       label="Download forecast CSV",
       data=active_forecast_path.read_bytes(),
