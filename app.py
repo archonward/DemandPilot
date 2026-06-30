@@ -15,6 +15,7 @@ SAMPLE_HISTORICAL_PATH = Path("data/sample/sample_sales_series.csv")
 SAMPLE_FORECAST_PATH = Path("data/processed/sample_forecast.csv")
 HISTORICAL_WINDOW_DAYS = 180
 MIN_HISTORY_ROWS = 180
+UPLOAD_REQUIRED_COLUMNS = ["date", "series_id", "value"]
 
 
 st.set_page_config(
@@ -319,24 +320,216 @@ def build_backtest_chart(backtest_df: pd.DataFrame) -> go.Figure:
   return fig
 
 
-def main() -> None:
-  st.title("DemandPilot: Retail Demand Forecasting")
-  st.caption(
-      "This dashboard uses TimesFM-generated forecasts to help estimate "
-      "future product demand."
+def build_uploaded_history_chart(uploaded_series_df: pd.DataFrame) -> go.Figure:
+  plot_df = uploaded_series_df.tail(HISTORICAL_WINDOW_DAYS).copy()
+
+  fig = go.Figure()
+  fig.add_trace(
+      go.Scatter(
+          x=plot_df["date"],
+          y=plot_df["value"],
+          mode="lines",
+          name="Historical demand",
+          line={"color": "#1f77b4", "width": 2},
+      )
+  )
+  fig.update_layout(
+      title="Historical Demand from Uploaded CSV",
+      xaxis_title="Date",
+      yaxis_title="Value",
+      hovermode="x unified",
+      height=450,
+      margin={"l": 20, "r": 20, "t": 60, "b": 20},
+  )
+  return fig
+
+
+def get_missing_required_columns(df: pd.DataFrame) -> list[str]:
+  return [column for column in UPLOAD_REQUIRED_COLUMNS if column not in df.columns]
+
+
+def validate_uploaded_csv(uploaded_df: pd.DataFrame) -> tuple[pd.DataFrame | None, dict]:
+  working_df = uploaded_df.copy()
+  validation_summary: dict[str, int] = {}
+
+  parsed_dates = pd.to_datetime(working_df["date"], errors="coerce")
+  original_date_strings = working_df["date"].astype("string").str.strip()
+  invalid_date_mask = original_date_strings.notna() & (original_date_strings != "") & parsed_dates.isna()
+  invalid_date_count = int(invalid_date_mask.sum())
+  validation_summary["invalid_date_count"] = invalid_date_count
+  if invalid_date_count > 0:
+    return None, validation_summary
+
+  numeric_values = pd.to_numeric(working_df["value"], errors="coerce")
+  original_value_strings = working_df["value"].astype("string").str.strip()
+  invalid_value_mask = (
+      original_value_strings.notna()
+      & (original_value_strings != "")
+      & numeric_values.isna()
+  )
+  invalid_value_count = int(invalid_value_mask.sum())
+  validation_summary["invalid_value_count"] = invalid_value_count
+  if invalid_value_count > 0:
+    return None, validation_summary
+
+  working_df["date"] = parsed_dates
+  working_df["value"] = numeric_values
+  working_df["series_id"] = working_df["series_id"].astype("string").str.strip()
+  working_df = working_df.dropna(subset=UPLOAD_REQUIRED_COLUMNS)
+  working_df = working_df.loc[working_df["series_id"] != ""].copy()
+  working_df = working_df[UPLOAD_REQUIRED_COLUMNS]
+  working_df = working_df.sort_values(["series_id", "date"]).reset_index(drop=True)
+  return working_df, validation_summary
+
+
+def render_uploaded_csv_mode() -> None:
+  st.header("Upload Demand CSV")
+  st.write("The uploaded CSV must contain:")
+  st.markdown(
+      """
+      - `date`: daily date column
+      - `series_id`: product/store/time-series identifier
+      - `value`: numeric demand or sales quantity
+      """
   )
 
-  with st.sidebar:
-    st.header("Instructions")
-    st.caption(
-      "Current status: dashboard with historical exploration, selected-series "
-      "forecasting, inventory recommendations, and backtest evaluation when "
-      "generated."
-    )
-    st.write("Step 1: Prepare dataset")
-    st.write("Step 2: Run TimesFM forecast script")
-    st.write("Step 3: View forecast in dashboard")
+  uploaded_file = st.file_uploader(
+      "Upload a demand CSV",
+      type=["csv"],
+      accept_multiple_files=False,
+  )
 
+  if uploaded_file is None:
+    st.info(
+        "Upload forecasting is not enabled yet. This step only validates and "
+        "previews uploaded demand data. In the next phase, DemandPilot will "
+        "support TimesFM forecasting for uploaded CSV files."
+    )
+    return
+
+  try:
+    uploaded_df = pd.read_csv(uploaded_file)
+  except Exception as exc:
+    st.error(f"Could not read the uploaded CSV: {exc}")
+    return
+
+  st.subheader("Preview")
+  st.dataframe(uploaded_df.head(10), use_container_width=True)
+
+  missing_columns = get_missing_required_columns(uploaded_df)
+  if missing_columns:
+    st.error(
+        "Missing required columns: "
+        + ", ".join(f"`{column}`" for column in missing_columns)
+    )
+    return
+
+  cleaned_uploaded_df, validation_summary = validate_uploaded_csv(uploaded_df)
+
+  invalid_date_count = validation_summary.get("invalid_date_count", 0)
+  if invalid_date_count > 0:
+    st.error(f"Found {invalid_date_count} invalid dates in `date`.")
+    return
+
+  invalid_value_count = validation_summary.get("invalid_value_count", 0)
+  if invalid_value_count > 0:
+    st.error(f"Found {invalid_value_count} invalid values in `value`.")
+    return
+
+  if cleaned_uploaded_df is None or cleaned_uploaded_df.empty:
+    st.error("No valid rows remain after cleaning the uploaded CSV.")
+    return
+
+  st.success("CSV validation passed.")
+
+  quality_metrics_top = st.columns(3)
+  quality_metrics_top[0].metric("Total rows", f"{len(cleaned_uploaded_df):,}")
+  quality_metrics_top[1].metric(
+      "Unique series",
+      f"{cleaned_uploaded_df['series_id'].nunique():,}",
+  )
+  quality_metrics_top[2].metric(
+      "Average demand",
+      f"{cleaned_uploaded_df['value'].mean():.2f}",
+  )
+
+  quality_metrics_bottom = st.columns(3)
+  quality_metrics_bottom[0].metric(
+      "Earliest date",
+      cleaned_uploaded_df["date"].min().date().isoformat(),
+  )
+  quality_metrics_bottom[1].metric(
+      "Latest date",
+      cleaned_uploaded_df["date"].max().date().isoformat(),
+  )
+  quality_metrics_bottom[2].metric(
+      "Zero-demand rows",
+      f"{int((cleaned_uploaded_df['value'] == 0).sum()):,}",
+  )
+
+  uploaded_series_options = cleaned_uploaded_df["series_id"].drop_duplicates().tolist()
+  selected_uploaded_series_id = st.selectbox(
+      "series_id",
+      uploaded_series_options,
+  )
+
+  selected_uploaded_series_df = cleaned_uploaded_df.loc[
+      cleaned_uploaded_df["series_id"] == selected_uploaded_series_id
+  ].copy()
+
+  st.subheader("Selected Uploaded Series")
+  uploaded_series_metrics = st.columns(5)
+  uploaded_series_metrics[0].metric(
+      "Historical rows",
+      f"{len(selected_uploaded_series_df):,}",
+  )
+  uploaded_series_metrics[1].metric(
+      "Date range",
+      format_date_range(selected_uploaded_series_df),
+  )
+  uploaded_series_metrics[2].metric(
+      "Average daily demand",
+      f"{selected_uploaded_series_df['value'].mean():.2f}",
+  )
+  uploaded_series_metrics[3].metric(
+      "Max daily demand",
+      f"{selected_uploaded_series_df['value'].max():.2f}",
+  )
+  uploaded_series_metrics[4].metric(
+      "Total demand",
+      f"{selected_uploaded_series_df['value'].sum():.2f}",
+  )
+
+  if len(selected_uploaded_series_df) < MIN_HISTORY_ROWS:
+    st.warning(
+        "This uploaded series has limited history. TimesFM forecast quality "
+        "may be weaker."
+    )
+
+  st.subheader("Historical Demand")
+  st.caption("The chart shows the most recent 180 rows from the uploaded series.")
+  st.plotly_chart(
+      build_uploaded_history_chart(selected_uploaded_series_df),
+      use_container_width=True,
+  )
+
+  st.subheader("Historical Rows")
+  st.dataframe(selected_uploaded_series_df, use_container_width=True)
+
+  st.download_button(
+      label="Download cleaned uploaded data",
+      data=cleaned_uploaded_df.to_csv(index=False).encode("utf-8"),
+      file_name="cleaned_uploaded_demand.csv",
+      mime="text/csv",
+  )
+  st.info(
+      "Upload forecasting is not enabled yet. This step only validates and "
+      "previews uploaded demand data. In the next phase, DemandPilot will "
+      "support TimesFM forecasting for uploaded CSV files."
+  )
+
+
+def render_demo_dataset_mode() -> None:
   if not PROCESSED_HISTORY_PATH.exists():
     st.error(f"Missing processed historical CSV: `{PROCESSED_HISTORY_PATH}`")
     return
@@ -766,6 +959,34 @@ def main() -> None:
   numeric_columns = display_forecast_df.select_dtypes(include="number").columns
   display_forecast_df[numeric_columns] = display_forecast_df[numeric_columns].round(2)
   st.dataframe(display_forecast_df, use_container_width=True)
+
+
+def main() -> None:
+  st.title("DemandPilot: Retail Demand Forecasting")
+  st.caption(
+      "This dashboard uses TimesFM-generated forecasts to help estimate "
+      "future product demand."
+  )
+
+  with st.sidebar:
+    st.header("Instructions")
+    st.caption(
+      "Current status: dashboard with historical exploration, selected-series "
+      "forecasting, inventory recommendations, and backtest evaluation when "
+      "generated."
+    )
+    data_mode = st.radio(
+        "Data source",
+        options=["Demo dataset", "Upload CSV"],
+        index=0,
+    )
+    st.write("Step 1: Prepare dataset")
+    st.write("Step 2: Run TimesFM forecast script")
+    st.write("Step 3: View forecast in dashboard")
+  if data_mode == "Demo dataset":
+    render_demo_dataset_mode()
+  else:
+    render_uploaded_csv_mode()
 
 
 if __name__ == "__main__":
